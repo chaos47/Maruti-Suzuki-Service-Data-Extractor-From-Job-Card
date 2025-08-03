@@ -4,8 +4,8 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
+from datetime import datetime
 
-# Function to extract text from a PDF using PDFPlumber
 def extract_text_from_pdf(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -15,133 +15,150 @@ def extract_text_from_pdf(pdf_path):
         messagebox.showerror("Error", f"Failed to extract text from {pdf_path}: {str(e)}")
         return ""
 
-# Function to clean descriptions
 def clean_description(description):
-    # Remove all occurrences of the '%' character
     description = description.replace('%', '')
-    # Remove standalone numbers and decimals unless inside brackets
     description = re.sub(r'(?<!\()\b\d+(\.\d+)?\b(?!\))', '', description)
-    # Remove extra spaces caused by cleaning
     return re.sub(r'\s{2,}', ' ', description).strip()
 
-# Function to filter out invalid rows
 def is_valid_entry(description):
-    # Keywords to drop if found in the description
     invalid_keywords = ["Invoice", "State", "Model"]
-    # Check if description starts with or contains any invalid keywords
     return not any(keyword in description for keyword in invalid_keywords)
 
-# Function to extract part numbers, descriptions, and date
 def extract_info(text):
-    # Regex for matching part numbers and descriptions
     line_pattern = r"(\d{5}[A-Za-z\d]{5,9}(-[A-Za-z\d]+)?)\s+([^\n]+)"
-    date_pattern = r"(\d{2}/\d{2}/\d{4})"  # Date in DD/MM/YYYY format
-
-    # Extract part numbers and descriptions
+    date_pattern = r"(\d{2}/\d{2}/\d{4})"
     matches = re.findall(line_pattern, text)
-
-    # Extract the first date found in the text
     date_match = re.search(date_pattern, text)
     date = date_match.group(0) if date_match else "Unknown Date"
-
-    # Filter and clean descriptions
     part_numbers = []
     descriptions = []
     for match in matches:
         part_number = match[0]
-        description = clean_description(match[2])  # Clean the description
-        if is_valid_entry(description):  # Only keep valid descriptions
+        description = clean_description(match[2])
+        if is_valid_entry(description):
             part_numbers.append(part_number)
             descriptions.append(description)
-
     return date, part_numbers, descriptions
 
-# Function to process selected PDFs and display results in a table
+df_global = pd.DataFrame()
+
+def try_parse_date(date_str):
+    try:
+        return datetime.strptime(date_str, "%d/%m/%Y")
+    except:
+        return None
+
 def process_pdfs():
-    # File dialog for selecting PDFs
+    global df_global
     file_paths = filedialog.askopenfilenames(
         title="Select PDF Files", filetypes=[("PDF files", "*.pdf")]
     )
-
     if not file_paths:
         messagebox.showwarning("No Files", "No PDF files selected!")
         return
-
     all_data = []
-
-    # Process each PDF
     for pdf_file in file_paths:
         text = extract_text_from_pdf(pdf_file)
         if text:
             date, part_numbers, descriptions = extract_info(text)
-            # Add the PDF date as a heading
-            all_data.append([f"PDF Date: {date}", "", ""])  # Add PDF date as a heading
             for part_number, description in zip(part_numbers, descriptions):
                 all_data.append([date, part_number, description])
-            # Add separator rows after each PDF's data
-            all_data.append(["", "", ""])  # Add 1st blank row
-            all_data.append(["", "", ""])  # Add 2nd blank row
-            all_data.append(["", "", ""])  # Add 3rd blank row
-
-    # Create DataFrame to display the table
-    df = pd.DataFrame(all_data, columns=['Date', 'Part Number', 'Description'])
-
-    # Clear existing table if any
-    for row in treeview.get_children():
-        treeview.delete(row)
-
-    # Insert new data into the table
-    for _, row in df.iterrows():
-        treeview.insert("", "end", values=(row["Date"], row["Part Number"], row["Description"]))
-
-    # Enable saving option
+    df_global = pd.DataFrame(all_data, columns=['Date', 'Part Number', 'Description'])
+    update_treeview(df_global)
     save_button.config(state="normal")
     messagebox.showinfo("Success", "PDFs processed successfully!")
 
-# Function to save the data to a CSV file
-def save_to_csv():
-    file_path = filedialog.asksaveasfilename(
-        defaultextension=".csv", filetypes=[("CSV files", "*.csv")]
-    )
-    if file_path:
-        # Retrieve data from the table (treeview)
-        data = [treeview.item(row)["values"] for row in treeview.get_children()]
+def update_treeview(df):
+    for row in treeview.get_children():
+        treeview.delete(row)
 
-        # Convert to DataFrame and save as CSV
+    # Parse dates and group by year
+    df['Date_Parsed'] = df['Date'].apply(try_parse_date)
+    df['Year'] = df['Date_Parsed'].apply(lambda d: d.year if d else "Unknown")
+    df = df.sort_values(['Year', 'Date_Parsed'])
+
+    prev_year = None
+    for _, row in df.iterrows():
+        curr_year = row['Year']
+        if curr_year != prev_year:
+            # Insert a year separator row for a new year block
+            treeview.insert("", "end", values=(f"=== {curr_year} ===", "", ""), tags=("year_sep",))
+            prev_year = curr_year
+        treeview.insert("", "end", values=(row["Date"], row["Part Number"], row["Description"]))
+
+    # Style for year separators
+    treeview.tag_configure('year_sep', background='#d0e0ff', font=('Segoe UI', 10, 'bold'))
+
+def save_to_csv():
+    file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+    if file_path:
+        data = []
+        for iid in treeview.get_children():
+            values = treeview.item(iid)["values"]
+            # Skip separator rows
+            if not str(values[0]).startswith("==="):
+                data.append(values)
         df = pd.DataFrame(data, columns=["Date", "Part Number", "Description"])
         df.to_csv(file_path, index=False)
         messagebox.showinfo("Success", f"Data saved to {file_path}")
 
-# Create the main window (root)
+def sort_treeview(by, reverse=False):
+    global df_global
+    if df_global.empty:
+        return
+    df_sorted = df_global.copy()
+    if by == "Date":
+        df_sorted["Date_Parsed"] = df_sorted["Date"].apply(try_parse_date)
+        df_sorted = df_sorted.sort_values("Date_Parsed", ascending=not reverse)
+        df_sorted = df_sorted.drop("Date_Parsed", axis=1)
+    elif by == "Year":
+        df_sorted["Year"] = df_sorted["Date"].apply(lambda x: try_parse_date(x).year if try_parse_date(x) else 0)
+        df_sorted = df_sorted.sort_values("Year", ascending=not reverse)
+        df_sorted = df_sorted.drop("Year", axis=1)
+    else:
+        df_sorted = df_sorted.sort_values(by, ascending=not reverse)
+    update_treeview(df_sorted)
+
+# GUI setup
 root = tk.Tk()
 root.title("PDF Data Extractor")
-root.geometry("800x600")
+root.geometry("900x600")
 
-# Create a frame for the file selection and buttons
+# Top process/save
 frame = tk.Frame(root)
 frame.pack(pady=20)
-
-# Button to process PDFs
 process_button = tk.Button(frame, text="Select and Process PDFs", command=process_pdfs, width=20)
 process_button.grid(row=0, column=0, padx=10)
-
-# Button to save CSV (disabled until data is processed)
 save_button = tk.Button(frame, text="Save to CSV", command=save_to_csv, width=20, state="disabled")
 save_button.grid(row=0, column=1, padx=10)
 
-# Create a Treeview widget to display the table
+# Sorting options
+sort_frame = tk.LabelFrame(root, text="Sort Options")
+sort_frame.pack(pady=5)
+options = ["Date", "Year", "Part Number", "Description"]
+sort_var = tk.StringVar(value="Date")
+def do_sort():
+    sort_treeview(sort_var.get(), reverse=False)
+def do_sort_reverse():
+    sort_treeview(sort_var.get(), reverse=True)
+sort_dropdown = ttk.Combobox(sort_frame, textvariable=sort_var, values=options, state="readonly", width=12)
+sort_dropdown.grid(row=0, column=0, padx=5)
+sort_button = tk.Button(sort_frame, text="Sort Asc", command=do_sort)
+sort_button.grid(row=0, column=1, padx=3)
+sort_button_desc = tk.Button(sort_frame, text="Sort Desc", command=do_sort_reverse)
+sort_button_desc.grid(row=0, column=2, padx=3)
+
 treeview = ttk.Treeview(root, columns=("Date", "Part Number", "Description"), show="headings")
 treeview.pack(fill="both", expand=True, padx=20, pady=20)
-
-# Define the headings for the table
 treeview.heading("Date", text="Date")
 treeview.heading("Part Number", text="Part Number")
 treeview.heading("Description", text="Description")
-
-# Set column widths
-treeview.column("Date", width=100)
+treeview.column("Date", width=130)
 treeview.column("Part Number", width=200)
-treeview.column("Description", width=400)
+treeview.column("Description", width=450)
 
-# Start the Tkinter main loop
+# Make year separator row stand out
+style = ttk.Style(root)
+style.configure("Treeview", rowheight=24)
+
 root.mainloop()
